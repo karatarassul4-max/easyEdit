@@ -1,9 +1,9 @@
 import os
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
-from openai import AsyncOpenAI
 
 app = FastAPI(title="Anime Clip Matcher MVP")
 
@@ -17,11 +17,7 @@ app.add_middleware(
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-LLM_API_KEY = os.getenv("LLM_API_KEY")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-ai_client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 class SearchRequest(BaseModel):
     text: str
@@ -36,19 +32,20 @@ class ClipResponse(BaseModel):
 @app.post("/match-clip", response_model=ClipResponse)
 async def match_clip(payload: SearchRequest):
     try:
-        # Получаем эмбеддинг через внешний API
-        response = await ai_client.embeddings.create(
-            model="text-embedding-3-small", 
-            input=[payload.text]
-        )
-        user_embedding = response.data[0].embedding
+        # Получаем эмбеддинг через бесплатное API Hugging Face
+        hf_url = "https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        hf_res = requests.post(hf_url, json={"inputs": payload.text})
+        user_embedding = hf_res.json()
         
+        if not isinstance(user_embedding, list):
+            raise HTTPException(status_code=500, detail="Ошибка генерации вектора на Hugging Face")
+
         # Поиск в Supabase
         res = supabase.rpc(
             "match_clips",
             {
                 "query_embedding": user_embedding,
-                "match_threshold": 0.1,
+                "match_threshold": 0.0, -- Порог в ноль для теста
                 "match_count": 1
             }
         ).execute()
