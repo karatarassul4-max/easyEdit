@@ -53,7 +53,7 @@ async def match_clip(payload: SearchRequest):
         # 2. Делаем текстовый поиск в Supabase по ключевым словам
         res = supabase.table("anime_clips") \
             .select("*") \
-            .text_search("description", search_keywords, config="russian") \
+            .text_search("description", search_keywords) \
             .limit(1) \
             .execute()
         
