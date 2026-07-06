@@ -1,83 +1,61 @@
 import os
+import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
-from openai import OpenAI
 
-app = FastAPI(title="Anime Clip Matcher MVP")
+app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-# Инициализация баз данных
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Настройка Groq (используем официальный SDK OpenAI, так как Groq полностью с ним совместим)
-GROQ_API_KEY = os.getenv("LLM_API_KEY") # Сюда должен быть вставлен твой gsk_...
-groq_client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
-
-class SearchRequest(BaseModel):
+class UserRequest(BaseModel):
     text: str
 
-class ClipResponse(BaseModel):
-    id: int
-    title: str
-    video_url: str
-    description: str
-
-@app.post("/match-clip", response_model=ClipResponse)
-async def match_clip(payload: SearchRequest):
+@app.post("/match-clip")
+def match_clip(payload: UserRequest):
     try:
-        # 1. Просим ИИ вытащить 핵심-слова (ключевые слова для поиска)
-        prompt = f"""Выдели из этого текста 2-3 главных ключевых слова для поиска в базе данных. 
-        Пиши ТОЛЬКО ключевые слова через пробел, без лишнего текста, знаков препинания и объяснений.
-        Текст: {payload.text}"""
+        # 1. Генерируем вектор для поискового запроса пользователя через Hugging Face
+        # Важно: используем префикс 'query: ' для поискового запроса
+        hf_url = "https://api-inference.huggingface.co/models/intfloat/multilingual-e5-large"
+        hf_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        hf_payload = {"inputs": f"query: {payload.text}"}
         
-        chat_completion = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",  # <--- ПОМЕНЯЛИ МОДЕЛь ТУТ
-            temperature=0.1
-        )
-        
-        search_keywords = chat_completion.choices[0].message.content.strip()
-        
-        # ХИТРЫЙ ФИКС: превращаем "слово1 слово2" в "слово1 & слово2" для Postgres
-        formatted_keywords = " | ".join(search_keywords.split()) # Поменяли & на |
-        print(f"ИИ превратил запрос в ключевые слова: {formatted_keywords}")
-
-        # 2. Делаем текстовый поиск в Supabase с правильным форматом строки
-        res = supabase.table("anime_clips") \
-            .select("*") \
-            .text_search("description", formatted_keywords) \
-            .execute()
-        
-        # Если ничего не нашлось по точным словам, берем просто первый попавшийся клип для теста,
-        # чтобы фронтенд не падал
-        # Если ничего не нашлось по точным ключевым словам, 
-        # берем вообще любой первый клип, чтобы тест прошел успешно
-        if not res.data:
-            res = supabase.table("anime_clips").select("*").execute()
+        hf_res = requests.post(hf_url, json=hf_payload, headers=hf_headers)
+        if hf_res.status_code != 200:
+            raise HTTPException(status_code=500, detail="Ошибка генерации эмбеддинга Hugging Face")
             
-        if not res.data:
-            raise HTTPException(status_code=404, detail="В базе вообще нет клипов")
-            
-        # Берем самый первый клип из массива результатов
-        best_match = res.data[0]
+        query_vector = hf_res.json()
         
-        return ClipResponse(
-            id=best_match["id"],
-            title=best_match["title"],
-            video_url=best_match["video_url"],
-            description=best_match["description"]
-        )
+        # 2. Вызываем удаленную функцию (RPC) в Supabase для поиска по косинусному сходству
+        # match_threshold: 0.3 (минимальное сходство), match_count: 1 (нам нужен 1 лучший клип)
+        rpc_res = supabase.rpc(
+            "match_clips", 
+            {
+                "query_embedding": query_vector, 
+                "match_threshold": 0.3, 
+                "match_count": 1
+            }
+        ).execute()
+        
+        if not rpc_res.data:
+            # Если совпадений совсем нет, вернем дефолтный клип
+            fallback = supabase.table("anime_clips_vector").select("*").limit(1).execute()
+            if not fallback.data:
+                raise HTTPException(status_code=404, detail="Клипы в базе данных не найдены")
+            best_match = fallback.data[0]
+        else:
+            best_match = rpc_res.data[0]
+            
+        return {
+            "id": best_match["id"],
+            "title": best_match["title"],
+            "video_url": best_match["video_url"],
+            "description": best_match["description"]
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка бэкенда: {str(e)}")
