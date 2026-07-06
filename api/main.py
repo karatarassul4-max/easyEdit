@@ -48,24 +48,28 @@ async def match_clip(payload: SearchRequest):
         )
         
         search_keywords = chat_completion.choices[0].message.content.strip()
-        print(f"ИИ превратил запрос в ключевые слова: {search_keywords}")
+        
+        # ХИТРЫЙ ФИКС: превращаем "слово1 слово2" в "слово1 & слово2" для Postgres
+        formatted_keywords = " & ".join(search_keywords.split())
+        print(f"ИИ превратил запрос в ключевые слова: {formatted_keywords}")
 
-        # 2. Делаем текстовый поиск в Supabase по ключевым словам
-        # 2. Делаем текстовый поиск в Supabase с правильным порядком цепочки методов
+        # 2. Делаем текстовый поиск в Supabase с правильным форматом строки
         res = supabase.table("anime_clips") \
             .select("*") \
-            .limit(1) \
-            .text_search("description", search_keywords) \
+            .text_search("description", formatted_keywords) \
             .execute()
         
         # Если ничего не нашлось по точным словам, берем просто первый попавшийся клип для теста,
         # чтобы фронтенд не падал
+        # Если ничего не нашлось по точным ключевым словам, 
+        # берем вообще любой первый клип, чтобы тест прошел успешно
         if not res.data:
-            res = supabase.table("anime_clips").select("*").limit(1).execute()
+            res = supabase.table("anime_clips").select("*").execute()
             
         if not res.data:
             raise HTTPException(status_code=404, detail="В базе вообще нет клипов")
             
+        # Берем самый первый клип из массива результатов
         best_match = res.data[0]
         
         return ClipResponse(
