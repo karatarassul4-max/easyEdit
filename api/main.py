@@ -14,7 +14,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 class UserRequest(BaseModel):
     text: str
-
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "message": "FastAPI бэкенд для Easy-Edit успешно запущен на Vercel!",
+        "endpoints": {
+            "match_clip": "/match-clip (POST)"
+        }
+    }
 @app.post("/match-clip")
 def match_clip(payload: UserRequest):
     try:
