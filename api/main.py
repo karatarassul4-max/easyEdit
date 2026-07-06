@@ -51,10 +51,11 @@ async def match_clip(payload: SearchRequest):
         print(f"ИИ превратил запрос в ключевые слова: {search_keywords}")
 
         # 2. Делаем текстовый поиск в Supabase по ключевым словам
+        # 2. Делаем текстовый поиск в Supabase с правильным порядком цепочки методов
         res = supabase.table("anime_clips") \
             .select("*") \
-            .text_search("description", search_keywords) \
             .limit(1) \
+            .text_search("description", search_keywords) \
             .execute()
         
         # Если ничего не нашлось по точным словам, берем просто первый попавшийся клип для теста,
