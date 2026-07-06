@@ -50,7 +50,7 @@ async def match_clip(payload: SearchRequest):
         search_keywords = chat_completion.choices[0].message.content.strip()
         
         # ХИТРЫЙ ФИКС: превращаем "слово1 слово2" в "слово1 & слово2" для Postgres
-        formatted_keywords = " & ".join(search_keywords.split())
+        formatted_keywords = " | ".join(search_keywords.split()) # Поменяли & на |
         print(f"ИИ превратил запрос в ключевые слова: {formatted_keywords}")
 
         # 2. Делаем текстовый поиск в Supabase с правильным форматом строки
