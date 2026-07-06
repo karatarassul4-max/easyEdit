@@ -43,7 +43,7 @@ async def match_clip(payload: SearchRequest):
         
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama3-8b-8192",
+            model="llama-3.1-8b-instant",  # <--- ПОМЕНЯЛИ МОДЕЛь ТУТ
             temperature=0.1
         )
         
