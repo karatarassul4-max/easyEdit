@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
-from sentence_transformers import SentenceTransformer
+from openai import AsyncOpenAI
 
 app = FastAPI(title="Anime Clip Matcher MVP")
 
@@ -17,12 +17,11 @@ app.add_middleware(
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Загружаем ту же самую модель на Vercel
-# Модель легковесная, Vercel успеет её подгрузить
-model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+ai_client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 class SearchRequest(BaseModel):
     text: str
@@ -37,23 +36,27 @@ class ClipResponse(BaseModel):
 @app.post("/match-clip", response_model=ClipResponse)
 async def match_clip(payload: SearchRequest):
     try:
-        # Генерируем вектор из текста пользователя (384 измерения)
-        user_embedding = model.encode(payload.text).tolist()
+        # Получаем эмбеддинг через внешний API
+        response = await ai_client.embeddings.create(
+            model="text-embedding-3-small", 
+            input=[payload.text]
+        )
+        user_embedding = response.data[0].embedding
         
-        # Ищем в Supabase
-        response = supabase.rpc(
+        # Поиск в Supabase
+        res = supabase.rpc(
             "match_clips",
             {
                 "query_embedding": user_embedding,
-                "match_threshold": 0.1,  # Снизим порог для теста
+                "match_threshold": 0.1,
                 "match_count": 1
             }
         ).execute()
         
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Подходящий клип не найден")
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Клип не найден")
             
-        best_match = response.data[0]
+        best_match = res.data[0]
         
         return ClipResponse(
             id=best_match["id"],
@@ -64,4 +67,4 @@ async def match_clip(payload: SearchRequest):
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
