@@ -22,7 +22,7 @@ def match_clip(payload: UserRequest):
         from supabase import create_client
         
         SUPABASE_URL = os.environ.get("SUPABASE_URL")
-        SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+        SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         HF_TOKEN = os.environ.get("HF_TOKEN")
         
         if not SUPABASE_URL or not SUPABASE_KEY:
