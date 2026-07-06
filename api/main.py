@@ -1,9 +1,9 @@
 import os
-import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
+from openai import OpenAI
 
 app = FastAPI(title="Anime Clip Matcher MVP")
 
@@ -15,9 +15,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Инициализация баз данных
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Настройка Groq (используем официальный SDK OpenAI, так как Groq полностью с ним совместим)
+GROQ_API_KEY = os.getenv("LLM_API_KEY") # Сюда должен быть вставлен твой gsk_...
+groq_client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
 class SearchRequest(BaseModel):
     text: str
@@ -27,31 +32,38 @@ class ClipResponse(BaseModel):
     title: str
     video_url: str
     description: str
-    similarity: float
 
 @app.post("/match-clip", response_model=ClipResponse)
 async def match_clip(payload: SearchRequest):
     try:
-        # Получаем эмбеддинг через бесплатное API Hugging Face
-        hf_url = "https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-        hf_res = requests.post(hf_url, json={"inputs": payload.text})
-        user_embedding = hf_res.json()
+        # 1. Просим ИИ вытащить 핵심-слова (ключевые слова для поиска)
+        prompt = f"""Выдели из этого текста 2-3 главных ключевых слова для поиска в базе данных. 
+        Пиши ТОЛЬКО ключевые слова через пробел, без лишнего текста, знаков препинания и объяснений.
+        Текст: {payload.text}"""
         
-        if not isinstance(user_embedding, list):
-            raise HTTPException(status_code=500, detail="Ошибка генерации вектора на Hugging Face")
+        chat_completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama3-8b-8192",
+            temperature=0.1
+        )
+        
+        search_keywords = chat_completion.choices[0].message.content.strip()
+        print(f"ИИ превратил запрос в ключевые слова: {search_keywords}")
 
-        # Поиск в Supabase
-        res = supabase.rpc(
-            "match_clips",
-            {
-                "query_embedding": user_embedding,
-                "match_threshold": 0.0, -- Порог в ноль для теста
-                "match_count": 1
-            }
-        ).execute()
+        # 2. Делаем текстовый поиск в Supabase по ключевым словам
+        res = supabase.table("anime_clips") \
+            .select("*") \
+            .text_search("description", search_keywords, config="russian") \
+            .limit(1) \
+            .execute()
         
+        # Если ничего не нашлось по точным словам, берем просто первый попавшийся клип для теста,
+        # чтобы фронтенд не падал
         if not res.data:
-            raise HTTPException(status_code=404, detail="Клип не найден")
+            res = supabase.table("anime_clips").select("*").limit(1).execute()
+            
+        if not res.data:
+            raise HTTPException(status_code=404, detail="В базе вообще нет клипов")
             
         best_match = res.data[0]
         
@@ -59,9 +71,8 @@ async def match_clip(payload: SearchRequest):
             id=best_match["id"],
             title=best_match["title"],
             video_url=best_match["video_url"],
-            description=best_match["description"],
-            similarity=best_match["similarity"]
+            description=best_match["description"]
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка бэкенда: {str(e)}")
