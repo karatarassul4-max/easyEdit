@@ -1,12 +1,13 @@
 import os
-from fastapi import FastAPI
+import requests as sync_requests
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 app = FastAPI()
 
-class VectorRequest(BaseModel):
-    vector: list  # Принимаем готовый 512-мерный вектор из OpenCLIP
+class TextRequest(BaseModel):
+    query: str  # Теперь принимаем от браузера чистый текст, а не вектор!
 
 # === ФРОНТЕНД: Красивая страница поиска ===
 @app.get("/", response_class=HTMLResponse)
@@ -18,7 +19,6 @@ def read_root():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Anime Semantic Search</title>
-        <!-- Подключаем Tailwind CSS для стилей -->
         <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
         <style>
             body { background-color: #000000; color: #f4f4f5; }
@@ -53,7 +53,7 @@ def read_root():
             </div>
         </div>
 
-        <div id="loader" class="text-purple-400 font-medium hidden">Кодируем текст через Hugging Face и ищем в базе...</div>
+        <div id="loader" class="text-purple-400 font-medium hidden">Сервер генерирует вектор через Hugging Face и ищет в базе...</div>
         <div id="errorBox" class="text-red-400 font-medium hidden mt-4"></div>
 
         <script>
@@ -66,32 +66,17 @@ def read_root():
                 
                 if (!query) return;
 
-                // Включаем лоадер
                 btn.disabled = true;
                 loader.classList.remove('hidden');
                 resultContainer.classList.add('hidden');
                 errorBox.classList.add('hidden');
 
                 try {
-                    // 1. Получаем вектор текста напрямую через Hugging Face Inference API из браузера
-                    // Токен зашит прямо сюда, либо можно дергать через прокси, но для демо-проекта так быстрее всего
-                    const hfRes = await fetch(
-                        'https://api-inference.huggingface.co/pipeline/feature-extraction/laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
-                        {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ inputs: query })
-                        }
-                    );
-
-                    if (!hfRes.ok) throw new Error('Ошибка кодирования текста через Hugging Face API');
-                    const vector = await hfRes.json();
-
-                    // 2. Отправляем вектор на наш эндпоинт на Vercel
-                    const response = await fetch('/match-clip', {
+                    // Отправляем чистый текст на наш бэкенд /search
+                    const response = await fetch('/search', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ vector: vector })
+                        body: JSON.stringify({ query: query })
                     });
 
                     const result = await response.json();
@@ -100,7 +85,6 @@ def read_root():
                         throw new Error(result.details || result.error);
                     }
 
-                    // 3. Отображаем видеоплеер
                     document.getElementById('clipTitle').innerText = result.title;
                     const videoElement = document.getElementById('clipVideo');
                     videoElement.src = result.video_url;
@@ -120,22 +104,42 @@ def read_root():
     """
     return HTMLResponse(content=html_content, status_code=200)
 
-# === БЭКЕНД: Поиск по базе данных ===
-@app.post("/match-clip")
-def match_clip(payload: VectorRequest):
+# === БЭКЕНД: Безопасный поиск (Генерация вектора + Supabase RPC) ===
+@app.post("/search")
+def search_anime(payload: TextRequest):
     try:
         from supabase import create_client
         
         SUPABASE_URL = os.environ.get("SUPABASE_URL")
         SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        HF_TOKEN = os.environ.get("HF_TOKEN")
         
+        if not HF_TOKEN:
+            return {"error": "Ошибка конфигурации", "details": "Переменная окружения HF_TOKEN не задана в Vercel"}
+
+        # 1. Запрашиваем вектор текста у Hugging Face API прямо с сервера
+        hf_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        
+        hf_res = sync_requests.post(hf_url, headers=headers, json={"inputs": payload.query}, timeout=10)
+        
+        if hf_res.status_code != 200:
+            return {"error": "Ошибка Hugging Face API", "details": f"Код {hf_res.status_code}: {hf_res.text}"}
+            
+        vector = hf_res.json()
+
+        # Проверка структуры ответа (иногда HF возвращает вложенный массив [[...]])
+        if isinstance(vector, list) and len(vector) > 0 and isinstance(vector[0], list):
+            vector = vector[0]
+
+        # 2. Подключаемся к Supabase и выполняем поиск
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
         try:
             rpc_res = supabase.rpc(
                 "match_anime_clips_clip", 
                 {
-                    "query_embedding": payload.vector, 
+                    "query_embedding": vector, 
                     "match_threshold": 0.0, 
                     "match_count": 1
                 }
