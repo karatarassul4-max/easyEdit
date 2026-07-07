@@ -6,13 +6,10 @@ from pydantic import BaseModel
 app = FastAPI()
 
 class VectorRequest(BaseModel):
-    vector: list  # Возвращаемся к приему готового вектора от клиента
+    vector: list
 
-# === ФРОНТЕНД ===
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    # Забираем токен из окружения бэкенда, чтобы безопасно передать его в JS при загрузке страницы
-    # Таким образом, тебе не нужно писать его текстом в коде!
     hf_token = os.environ.get("HF_TOKEN", "")
 
     html_content = f"""
@@ -56,11 +53,52 @@ def read_root():
             </div>
         </div>
 
-        <div id="loader" class="text-purple-400 font-medium hidden">Браузер генерирует вектор через Hugging Face и отправляет в Supabase...</div>
-        <div id="errorBox" class="text-red-400 font-medium hidden mt-4"></div>
+        <div id="loader" class="text-purple-400 font-medium hidden"></div>
+        <div id="errorBox" class="text-red-400 font-medium hidden mt-4 max-w-2xl bg-red-950/20 p-4 rounded-xl border border-red-900/30 text-center"></div>
 
         <script>
             const HF_TOKEN = "{hf_token}";
+
+            async function queryHuggingFace(text, retries = 3) {{
+                const loader = document.getElementById('loader');
+                const url = 'https://api-inference.huggingface.co/pipeline/feature-extraction/laion/CLIP-ViT-B-32-laion2B-s34B-b79K';
+                
+                for (let i = 0; i < retries; i++) {{
+                    try {{
+                        const response = await fetch(url, {{
+                            method: 'POST',
+                            headers: {{ 
+                                'Authorization': 'Bearer ' + HF_TOKEN,
+                                'Content-Type': 'application/json'
+                            }},
+                            body: JSON.stringify({{ inputs: text }})
+                        }});
+
+                        const result = await response.json();
+
+                        // Если модель загружается, Hugging Face возвращает специальный статус с оценкой времени ожидания
+                        if (result.estimated_time || (result.error && result.error.includes('loading'))) {{
+                            const waitTime = Math.ceil(result.estimated_time || 5);
+                            loader.innerText = `Модель OpenCLIP просыпается на сервере... Ждем ${{waitTime}} сек. (Попытка ${{i+1}}/${{retries}})`;
+                            // Ждем указанное время перед повторным запросом
+                            await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+                            continue;
+                        }}
+
+                        if (!response.ok) {{
+                            throw new Error(result.error || `Ошибка сервера HF (Статус ${{response.status}})`);
+                        }}
+
+                        return result;
+                    }} catch (err) {{
+                        // Если это последняя попытка, прокидываем ошибку дальше
+                        if (i === retries - 1) throw err;
+                        loader.innerText = `Сетевой сбой, пробуем еще раз...`;
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    }}
+                }}
+                throw new Error('Не удалось получить ответ от Hugging Face после нескольких попыток.');
+            }}
 
             async function performSearch() {{
                 const query = document.getElementById('queryInput').value.trim();
@@ -72,37 +110,26 @@ def read_root():
                 if (!query) return;
 
                 btn.disabled = true;
+                loader.innerText = "Генерируем вектор текста...";
                 loader.classList.remove('hidden');
                 resultContainer.classList.add('hidden');
                 errorBox.classList.add('hidden');
 
                 try {{
-                    // Отправляем запрос на Hugging Face напрямую из браузера, но с правильными заголовками авторизации
-                    const hfRes = await fetch(
-                        'https://api-inference.huggingface.co/pipeline/feature-extraction/laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
-                        {{
-                            method: 'POST',
-                            headers: {{ 
-                                'Authorization': 'Bearer ' + HF_TOKEN,
-                                'Content-Type': 'application/json'
-                            }},
-                            body: JSON.stringify({{ inputs: query }})
-                        }}
-                    );
-
-                    if (!hfRes.ok) {{
-                        const errData = await hfRes.text();
-                        throw new Error('Hugging Face API Error: ' + errData);
+                    if (!HF_TOKEN) {{
+                        throw new Error("Переменная HF_TOKEN пустая на сервере Vercel. Проверь Environment Variables.");
                     }}
-                    
-                    let vector = await hfRes.json();
 
-                    // Корректируем размерность, если HF вернул двумерный массив [[...]]
+                    // 1. Получаем вектор с учетом прогрева модели
+                    let vector = await queryHuggingFace(query);
+
                     if (Array.isArray(vector) && vector.length > 0 && Array.isArray(vector[0])) {{
                         vector = vector[0];
                     }}
 
-                    // Теперь отправляем готовый вектор на наш FastAPI (который Vercel пропустит, так как это внутренний роут)
+                    loader.innerText = "Ищем совпадения в Supabase...";
+
+                    // 2. Отправляем на наш FastAPI
                     const response = await fetch('/match-clip', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
@@ -123,6 +150,7 @@ def read_root():
                 }} catch (err) {{
                     errorBox.innerText = 'Произошла ошибка: ' + err.message;
                     errorBox.classList.remove('hidden');
+                    console.error(err);
                 }} finally {{
                     btn.disabled = false;
                     loader.classList.add('hidden');
@@ -134,7 +162,6 @@ def read_root():
     """
     return HTMLResponse(content=html_content, status_code=200)
 
-# === БЭКЕНД ===
 @app.post("/match-clip")
 def match_clip(payload: VectorRequest):
     try:
