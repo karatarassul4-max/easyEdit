@@ -5,18 +5,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Anime Clip Matcher API")
+app = FastAPI(title="Anime Clip Matcher API with Debug")
 
-# Настройка CORS, чтобы фронтенд мог спокойно делать запросы
+# Настройка CORS для работы с фронтендом
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Для продакшена лучше указать конкретный домен твоего фронтенда
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Описание структуры входящего запроса
 class VectorRequest(BaseModel):
     vector: List[float]
     query: str
@@ -32,17 +31,23 @@ def match_clip(payload: VectorRequest):
         
         SUPABASE_URL = os.environ.get("SUPABASE_URL")
         SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-        
-        # Используем переменную окружения, уже настроенную на Vercel
         GROQ_API_KEY = os.environ.get("LLM_API_KEY")
         
         if not SUPABASE_URL or not SUPABASE_KEY:
-            raise HTTPException(status_code=500, detail="Конфигурация Supabase отсутствует в переменных окружения")
+            raise HTTPException(status_code=500, detail="Конфигурация Supabase отсутствует")
             
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
+        # Словарь, который мы вернем на фронтенд для анализа проблем
+        debug_info = {
+            "groq_activated": False,
+            "groq_error": None,
+            "raw_judge_decision": None,
+            "candidates_offered": []
+        }
+        
         try:
-            # Вытягиваем ТОП-10 кандидатов через RPC-функцию соответствия векторов
+            # Вытягиваем ТОП-10 кандидатов через RPC-функцию
             rpc_res = supabase.rpc(
                 "match_anime_clips_clip", 
                 {
@@ -56,23 +61,32 @@ def match_clip(payload: VectorRequest):
         
         candidates = rpc_res.data if rpc_res.data else []
         
-        # Если векторный поиск ничего не вернул, ищем хотя бы одну запись для фолбека
+        # Если база пуста — мягкий фолбек
         if not candidates:
             fallback = supabase.table("anime_clips_clip").select("id", "title", "video_url").limit(1).execute()
             if fallback.data:
                 return {
                     "id": fallback.data[0]["id"],
                     "title": fallback.data[0]["title"],
-                    "video_url": fallback.data[0]["video_url"]
+                    "video_url": fallback.data[0]["video_url"],
+                    "debug": {"groq_activated": False, "groq_error": "База пуста, сработал глобальный фолбек", "candidates_offered": []}
                 }
-            return {"error": "База данных пуста"}
+            return {"error": "База данных полностью пуста"}
 
-        # Если нашелся всего один кандидат или ключ API для Groq не задан — реранкинг пропускается
+        # Записываем, что именно нам вернул векторный поиск
+        debug_info["candidates_offered"] = [
+            {"id": c.get("id"), "title": c.get("title")} for c in candidates
+        ]
+
+        # Если нашелся всего один кандидат или ключ API не задан — реранкинг пропускается
         if len(candidates) == 1 or not GROQ_API_KEY:
+            if not GROQ_API_KEY:
+                debug_info["groq_error"] = "Ключ LLM_API_KEY не найден в переменных окружения Vercel"
             return {
                 "id": candidates[0]["id"],
                 "title": candidates[0]["title"],
-                "video_url": candidates[0]["video_url"]
+                "video_url": candidates[0]["video_url"],
+                "debug": debug_info
             }
 
         # --- ЭТАП МОДЕЛИ-СУДЬИ (GROQ СУДЬЯ) ---
@@ -110,21 +124,23 @@ def match_clip(payload: VectorRequest):
                 response_format={"type": "json_object"}
             )
             
+            debug_info["raw_judge_decision"] = response.choices[0].message.content
             judge_decision = json.loads(response.choices[0].message.content)
             best_id = int(judge_decision.get("best_id"))
             
-            # Находим объект по выбранному ID среди кандидатов
+            # Находим выбранный объект, иначе берем первый
             best_match = next((c for c in candidates if c["id"] == best_id), candidates[0])
+            debug_info["groq_activated"] = True
             
         except Exception as groq_err:
-            print(f"Ошибка Groq: {groq_err}")
-            # Мягкий откат на первый (наиболее релевантный по вектору) элемент при любом сбое LLM
+            debug_info["groq_error"] = f"Сбой этапа Groq: {str(groq_err)}"
             best_match = candidates[0]
             
         return {
             "id": best_match["id"],
             "title": best_match["title"],
-            "video_url": best_match["video_url"]
+            "video_url": best_match["video_url"],
+            "debug": debug_info
         }
         
     except Exception as e:
