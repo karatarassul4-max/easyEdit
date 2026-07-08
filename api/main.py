@@ -5,9 +5,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Anime Clip Matcher API with Updated Groq")
+app = FastAPI(title="Anime Clip Matcher API with Full Candidates Data")
 
-# Настройка CORS для работы с фронтендом
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,7 +37,6 @@ def match_clip(payload: VectorRequest):
             
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # Словарь для фронтенда для анализа проблем
         debug_info = {
             "groq_activated": False,
             "groq_error": None,
@@ -47,7 +45,6 @@ def match_clip(payload: VectorRequest):
         }
         
         try:
-            # Вытягиваем ТОП-10 кандидатов через RPC-функцию соответствия векторов
             rpc_res = supabase.rpc(
                 "match_anime_clips_clip", 
                 {
@@ -61,7 +58,6 @@ def match_clip(payload: VectorRequest):
         
         candidates = rpc_res.data if rpc_res.data else []
         
-        # Если база пуста — мягкий фолбек
         if not candidates:
             fallback = supabase.table("anime_clips_clip").select("id", "title", "video_url").limit(1).execute()
             if fallback.data:
@@ -69,16 +65,19 @@ def match_clip(payload: VectorRequest):
                     "id": fallback.data[0]["id"],
                     "title": fallback.data[0]["title"],
                     "video_url": fallback.data[0]["video_url"],
-                    "debug": {"groq_activated": False, "groq_error": "База пуста, сработал глобальный фолбек", "candidates_offered": []}
+                    "debug": {"groq_activated": False, "groq_error": "База пуста", "candidates_offered": []}
                 }
             return {"error": "База данных полностью пуста"}
 
-        # Записываем, что именно нам вернул векторный поиск
+        # Передаем полные объекты кандидатов (с video_url), чтобы фронтенд мог их отобразить
         debug_info["candidates_offered"] = [
-            {"id": c.get("id"), "title": c.get("title")} for c in candidates
+            {
+                "id": c.get("id"), 
+                "title": c.get("title"), 
+                "video_url": c.get("video_url")
+            } for c in candidates
         ]
 
-        # Если нашелся всего один кандидат или ключ API не задан — реранкинг пропускается
         if len(candidates) == 1 or not GROQ_API_KEY:
             if not GROQ_API_KEY:
                 debug_info["groq_error"] = "Ключ LLM_API_KEY не найден в переменных окружения Vercel"
@@ -89,7 +88,6 @@ def match_clip(payload: VectorRequest):
                 "debug": debug_info
             }
 
-        # --- ЭТАП МОДЕЛИ-СУДЬИ (GROQ СУДЬЯ) ---
         try:
             from openai import OpenAI
             
@@ -117,7 +115,7 @@ def match_clip(payload: VectorRequest):
 3. Верни результат строго в формате JSON: {{"best_id": <выбранный_id>}}"""
 
             response = ai_client.chat.completions.create(
-                model="llama-3.1-8b-instant",  # Актуальная и поддерживаемая модель Groq
+                model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": "You are a precise routing assistant that outputs only valid JSON."},
                     {"role": "user", "content": prompt}
@@ -130,7 +128,6 @@ def match_clip(payload: VectorRequest):
             judge_decision = json.loads(response.choices[0].message.content)
             best_id = int(judge_decision.get("best_id"))
             
-            # Находим выбранный объект, иначе берем первый (наиболее релевантный по вектору)
             best_match = next((c for c in candidates if c["id"] == best_id), candidates[0])
             debug_info["groq_activated"] = True
             
