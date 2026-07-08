@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Anime Clip Matcher API with Debug")
+app = FastAPI(title="Anime Clip Matcher API with Updated Groq")
 
 # Настройка CORS для работы с фронтендом
 app.add_middleware(
@@ -38,7 +38,7 @@ def match_clip(payload: VectorRequest):
             
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # Словарь, который мы вернем на фронтенд для анализа проблем
+        # Словарь для фронтенда для анализа проблем
         debug_info = {
             "groq_activated": False,
             "groq_error": None,
@@ -47,7 +47,7 @@ def match_clip(payload: VectorRequest):
         }
         
         try:
-            # Вытягиваем ТОП-10 кандидатов через RPC-функцию
+            # Вытягиваем ТОП-10 кандидатов через RPC-функцию соответствия векторов
             rpc_res = supabase.rpc(
                 "match_anime_clips_clip", 
                 {
@@ -109,13 +109,15 @@ def match_clip(payload: VectorRequest):
 Список кандидатов:
 {candidates_text}
 
+ВАЖНОЕ ПРАВИЛО: Если описания кандидатов содержат только технические названия (например, "Clip XXX") и не описывают реальную суть происходящего на видео, ты не сможешь сделать осознанный выбор. В этом случае строго выбери ID САМОГО ПЕРВОГО кандидата из списка кандидатов.
+
 Инструкция:
-1. Внимательно проанализируй запрос и описания кандидатов.
+1. Внимательно проанализируй запрос и описания.
 2. Выбери только ОДИН ID, который подходит лучше всего.
 3. Верни результат строго в формате JSON: {{"best_id": <выбранный_id>}}"""
 
             response = ai_client.chat.completions.create(
-                model="llama3-8b-8192",
+                model="llama-3.1-8b-instant",  # Актуальная и поддерживаемая модель Groq
                 messages=[
                     {"role": "system", "content": "You are a precise routing assistant that outputs only valid JSON."},
                     {"role": "user", "content": prompt}
@@ -128,7 +130,7 @@ def match_clip(payload: VectorRequest):
             judge_decision = json.loads(response.choices[0].message.content)
             best_id = int(judge_decision.get("best_id"))
             
-            # Находим выбранный объект, иначе берем первый
+            # Находим выбранный объект, иначе берем первый (наиболее релевантный по вектору)
             best_match = next((c for c in candidates if c["id"] == best_id), candidates[0])
             debug_info["groq_activated"] = True
             
